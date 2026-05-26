@@ -1,5 +1,7 @@
 #pragma once
 
+#include "duckdb_cache/expected.hpp"
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -13,6 +15,11 @@ namespace duckdb_cache {
 
 // A simple wrapper around DuckDB for storing and retrieving tables of
 // floating-point data. Each row consists of one or more `double` columns.
+//
+// Note: table and column names are passed straight through to SQL without
+// validation or quoting. Callers are responsible for supplying trusted,
+// well-formed identifiers (e.g. matching `[A-Za-z_][A-Za-z0-9_]*`). Do NOT
+// pass untrusted input as a table or column name.
 class FloatTableStore {
  public:
   // Open (or create) a DuckDB database at the given path. Use ":memory:" for
@@ -26,29 +33,32 @@ class FloatTableStore {
   FloatTableStore& operator=(FloatTableStore&&) noexcept;
 
   // Create a table with the given name and column names. All columns are
-  // stored as DOUBLE. Throws std::runtime_error on failure.
-  void CreateTable(const std::string& table,
-                   const std::vector<std::string>& columns);
+  // stored as DOUBLE.
+  [[nodiscard]] Status CreateTable(const std::string& table,
+                                   const std::vector<std::string>& columns);
 
   // Drop a table if it exists.
-  void DropTable(const std::string& table);
+  [[nodiscard]] Status DropTable(const std::string& table);
 
-  // Returns true if the named table exists.
-  bool TableExists(const std::string& table) const;
+  // Returns whether the named table exists.
+  [[nodiscard]] Expected<bool> TableExists(const std::string& table) const;
 
   // Append a single row of values. Row length must match the column count.
-  void InsertRow(const std::string& table, const std::vector<double>& row);
+  [[nodiscard]] Status InsertRow(const std::string& table,
+                                 const std::vector<double>& row);
 
   // Append many rows in a single transaction. Each row must match the column
   // count.
-  void InsertRows(const std::string& table,
-                  const std::vector<std::vector<double>>& rows);
+  [[nodiscard]] Status InsertRows(
+      const std::string& table,
+      const std::vector<std::vector<double>>& rows);
 
   // Read all rows from a table, returned row-major.
-  std::vector<std::vector<double>> SelectAll(const std::string& table) const;
+  [[nodiscard]] Expected<std::vector<std::vector<double>>> SelectAll(
+      const std::string& table) const;
 
   // Number of rows in the table.
-  std::size_t RowCount(const std::string& table) const;
+  [[nodiscard]] Expected<std::size_t> RowCount(const std::string& table) const;
 
  private:
   std::unique_ptr<::duckdb::DuckDB> db_;

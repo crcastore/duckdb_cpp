@@ -9,18 +9,13 @@ on:
 
 jobs:
   build-and-test:
-    name: ${{ matrix.os }} / ${{ matrix.sanitizer }}
+    name: ${{ matrix.os }} / ${{ matrix.build_type }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        sanitizer: [asan, none]
-        include:
-          - sanitizer: asan
-            cmake_flags: "-DENABLE_ASAN=ON"
-          - sanitizer: none
-            cmake_flags: "-DENABLE_ASAN=OFF"
+        build_type: [Debug, RelWithDebInfo]
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +33,7 @@ jobs:
           brew install cmake ninja
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja ${{ matrix.cmake_flags }} -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
 
       - name: Build
         run: cmake --build build -j

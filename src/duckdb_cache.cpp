@@ -2,33 +2,10 @@
 
 #include <duckdb.hpp>
 
+#include <exception>
 #include <sstream>
-#include <stdexcept>
 
 namespace duckdb_cache {
-
-namespace {
-
-// Validate that an identifier is safe to embed directly in a SQL statement.
-// DuckDB doesn't allow parameter binding for identifiers, so we restrict
-// table/column names to a conservative character set to prevent injection.
-void ValidateIdentifier(const std::string& id) {
-  if (id.empty()) {
-    throw std::invalid_argument("identifier must not be empty");
-  }
-  for (char c : id) {
-    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                    (c >= '0' && c <= '9') || c == '_';
-    if (!ok) {
-      throw std::invalid_argument("invalid identifier: " + id);
-    }
-  }
-  if (id[0] >= '0' && id[0] <= '9') {
-    throw std::invalid_argument("identifier must not start with a digit: " + id);
-  }
-}
-
-}  // namespace
 
 FloatTableStore::FloatTableStore(const std::string& path)
     : db_(std::make_unique<::duckdb::DuckDB>(path)),
@@ -38,109 +15,122 @@ FloatTableStore::~FloatTableStore() = default;
 FloatTableStore::FloatTableStore(FloatTableStore&&) noexcept = default;
 FloatTableStore& FloatTableStore::operator=(FloatTableStore&&) noexcept = default;
 
-void FloatTableStore::CreateTable(const std::string& table,
-                                  const std::vector<std::string>& columns) {
-  ValidateIdentifier(table);
+Status FloatTableStore::CreateTable(const std::string& table,
+                                    const std::vector<std::string>& columns) {
   if (columns.empty()) {
-    throw std::invalid_argument("at least one column is required");
+    return Status::error("at least one column is required");
   }
   std::ostringstream sql;
   sql << "CREATE TABLE " << table << " (";
   for (std::size_t i = 0; i < columns.size(); ++i) {
-    ValidateIdentifier(columns[i]);
     if (i > 0) sql << ", ";
     sql << columns[i] << " DOUBLE";
   }
   sql << ");";
   auto result = con_->Query(sql.str());
   if (result->HasError()) {
-    throw std::runtime_error("CreateTable failed: " + result->GetError());
+    return Status::error("CreateTable failed: " + result->GetError());
   }
+  return Ok();
 }
 
-void FloatTableStore::DropTable(const std::string& table) {
-  ValidateIdentifier(table);
+Status FloatTableStore::DropTable(const std::string& table) {
   auto result = con_->Query("DROP TABLE IF EXISTS " + table + ";");
   if (result->HasError()) {
-    throw std::runtime_error("DropTable failed: " + result->GetError());
+    return Status::error("DropTable failed: " + result->GetError());
   }
+  return Ok();
 }
 
-bool FloatTableStore::TableExists(const std::string& table) const {
-  ValidateIdentifier(table);
+Expected<bool> FloatTableStore::TableExists(const std::string& table) const {
   auto stmt = con_->Prepare(
       "SELECT COUNT(*) FROM information_schema.tables "
       "WHERE table_name = ?;");
   if (stmt->HasError()) {
-    throw std::runtime_error("TableExists prepare failed: " + stmt->GetError());
+    return Expected<bool>::error("TableExists prepare failed: " +
+                                 stmt->GetError());
   }
   auto result = stmt->Execute(table);
   if (result->HasError()) {
-    throw std::runtime_error("TableExists failed: " + result->GetError());
+    return Expected<bool>::error("TableExists failed: " + result->GetError());
   }
   auto chunk = result->Fetch();
   if (!chunk || chunk->size() == 0) return false;
   return chunk->GetValue(0, 0).GetValue<int64_t>() > 0;
 }
 
-void FloatTableStore::InsertRow(const std::string& table,
-                                const std::vector<double>& row) {
-  InsertRows(table, {row});
+Status FloatTableStore::InsertRow(const std::string& table,
+                                  const std::vector<double>& row) {
+  return InsertRows(table, {row});
 }
 
-void FloatTableStore::InsertRows(
+Status FloatTableStore::InsertRows(
     const std::string& table,
     const std::vector<std::vector<double>>& rows) {
-  ValidateIdentifier(table);
-  if (rows.empty()) return;
+  if (rows.empty()) return Ok();
 
-  // Use the Appender API for efficient bulk insertion.
-  ::duckdb::Appender appender(*con_, table);
   const std::size_t ncols = rows.front().size();
   for (const auto& row : rows) {
     if (row.size() != ncols) {
-      throw std::invalid_argument("inconsistent row width");
+      return Status::error("inconsistent row width");
     }
-    appender.BeginRow();
-    for (double v : row) {
-      appender.Append<double>(v);
-    }
-    appender.EndRow();
   }
-  appender.Close();
+
+  // DuckDB's Appender throws on errors (unknown table, type mismatch, etc.);
+  // translate those into the Expected error channel.
+  try {
+    ::duckdb::Appender appender(*con_, table);
+    for (const auto& row : rows) {
+      appender.BeginRow();
+      for (double v : row) {
+        appender.Append<double>(v);
+      }
+      appender.EndRow();
+    }
+    appender.Close();
+  } catch (const std::exception& e) {
+    return Status::error(std::string("InsertRows failed: ") + e.what());
+  }
+  return Ok();
 }
 
-std::vector<std::vector<double>> FloatTableStore::SelectAll(
+Expected<std::vector<std::vector<double>>> FloatTableStore::SelectAll(
     const std::string& table) const {
-  ValidateIdentifier(table);
+  using ResultT = std::vector<std::vector<double>>;
   auto result = con_->Query("SELECT * FROM " + table + ";");
   if (result->HasError()) {
-    throw std::runtime_error("SelectAll failed: " + result->GetError());
+    return Expected<ResultT>::error("SelectAll failed: " + result->GetError());
   }
   const std::size_t ncols = result->ColumnCount();
-  std::vector<std::vector<double>> out;
-  while (auto chunk = result->Fetch()) {
-    const std::size_t nrows = chunk->size();
-    for (std::size_t r = 0; r < nrows; ++r) {
-      std::vector<double> row;
-      row.reserve(ncols);
-      for (std::size_t c = 0; c < ncols; ++c) {
-        row.push_back(chunk->GetValue(c, r).GetValue<double>());
+  ResultT out;
+  try {
+    while (auto chunk = result->Fetch()) {
+      const std::size_t nrows = chunk->size();
+      for (std::size_t r = 0; r < nrows; ++r) {
+        std::vector<double> row;
+        row.reserve(ncols);
+        for (std::size_t c = 0; c < ncols; ++c) {
+          row.push_back(chunk->GetValue(c, r).GetValue<double>());
+        }
+        out.push_back(std::move(row));
       }
-      out.push_back(std::move(row));
     }
+  } catch (const std::exception& e) {
+    return Expected<ResultT>::error(std::string("SelectAll failed: ") +
+                                    e.what());
   }
   return out;
 }
 
-std::size_t FloatTableStore::RowCount(const std::string& table) const {
-  ValidateIdentifier(table);
+Expected<std::size_t> FloatTableStore::RowCount(
+    const std::string& table) const {
   auto result = con_->Query("SELECT COUNT(*) FROM " + table + ";");
   if (result->HasError()) {
-    throw std::runtime_error("RowCount failed: " + result->GetError());
+    return Expected<std::size_t>::error("RowCount failed: " +
+                                        result->GetError());
   }
   auto chunk = result->Fetch();
-  if (!chunk || chunk->size() == 0) return 0;
+  if (!chunk || chunk->size() == 0) return std::size_t{0};
   return static_cast<std::size_t>(chunk->GetValue(0, 0).GetValue<int64_t>());
 }
 

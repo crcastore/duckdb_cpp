@@ -5,24 +5,44 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+    Debug Release RelWithDebInfo MinSizeRel)
 endif()
+
+# Make sure RelWithDebInfo carries real debug info on all toolchains we use.
+# (CMake defaults are usually fine, but pin -O2 -g -DNDEBUG explicitly.)
+set(CMAKE_C_FLAGS_RELWITHDEBINFO   "-O2 -g -DNDEBUG" CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG" CACHE STRING "" FORCE)
 
 # ----------------------------------------------------------------------------
 # Sanitizers
 # ----------------------------------------------------------------------------
-option(ENABLE_ASAN "Enable AddressSanitizer + UBSan" ON)
+# Default behavior:
+#   * Debug builds       -> ASan + UBSan ON
+#   * Release/RWDI/etc.  -> sanitizers OFF
+# Override with -DENABLE_ASAN=ON/OFF or -DENABLE_TSAN=ON.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(_san_default ON)
+else()
+  set(_san_default OFF)
+endif()
+option(ENABLE_ASAN "Enable AddressSanitizer + UBSan" ${_san_default})
 option(ENABLE_TSAN "Enable ThreadSanitizer (mutually exclusive with ASAN)" OFF)
 
 add_library(sanitizer_flags INTERFACE)
 if(ENABLE_TSAN)
+  message(STATUS "Sanitizers: ThreadSanitizer enabled")
   target_compile_options(sanitizer_flags INTERFACE -fsanitize=thread -fno-omit-frame-pointer -g)
   target_link_options(sanitizer_flags INTERFACE -fsanitize=thread)
 elseif(ENABLE_ASAN)
+  message(STATUS "Sanitizers: AddressSanitizer + UBSan enabled")
   target_compile_options(sanitizer_flags INTERFACE
     -fsanitize=address,undefined -fno-omit-frame-pointer -fno-optimize-sibling-calls -g)
   target_link_options(sanitizer_flags INTERFACE -fsanitize=address,undefined)
+else()
+  message(STATUS "Sanitizers: disabled")
 endif()
 
 # ----------------------------------------------------------------------------
@@ -102,7 +122,10 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-add_executable(duckdb_cache_tests tests/test_duckdb_cache.cpp)
+add_executable(duckdb_cache_tests
+  tests/test_duckdb_cache.cpp
+  tests/test_expected.cpp
+)
 target_link_libraries(duckdb_cache_tests
   PRIVATE duckdb_cache GTest::gtest_main project_warnings sanitizer_flags)
 
